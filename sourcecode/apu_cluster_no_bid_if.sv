@@ -35,19 +35,21 @@ module apu_cluster
     parameter SHARED_DSP_MULT    = 0,
     parameter SHARED_INT_MULT    = 0,
     parameter SHARED_INT_DIV     = 0,
-    parameter SHARED_FP_DIVSQRT  = 0
+    parameter SHARED_FP_DIVSQRT  = 0,
+    parameter CUSTOM_VALGRIND    = 0
     )
    (
     // Clock and Reset
     input  logic                  clk_i,
     input  logic                  rst_ni,
-    
+
     cpu_marx_if.marx              cpus [C_NB_CORES-1:0]
-    
+
     );
 
    localparam WAPUTAG = $clog2(C_NB_CORES);
-   
+
+   localparam integer NAPUS_VALGRIND = 1;//(C_NB_CORES==2)      ? 1 : C_NB_CORES/2;
    localparam integer NAPUS_DSP_MULT = (C_NB_CORES==2)      ? 1 : C_NB_CORES/2;
    localparam integer NAPUS_INT_MULT = (C_NB_CORES==2)      ? 1 : C_NB_CORES/2;
    localparam integer NAPUS_INT_DIV  = (C_NB_CORES==2)      ? 1 : C_NB_CORES/4;
@@ -63,9 +65,10 @@ module apu_cluster
    // careful when modifying the following parameters. C_APUTYPES has to match with what is defined in apu_package.sv, and the individual types have to match what is defined in the core (riscv_decoder.sv)
    localparam APUTYPE_DSP_MULT   = (SHARED_DSP_MULT) ? 0 : 0;
    localparam APUTYPE_INT_MULT   = (SHARED_INT_MULT) ? SHARED_DSP_MULT : 0;
-   localparam APUTYPE_INT_DIV    = (SHARED_INT_DIV) ? SHARED_DSP_MULT + SHARED_INT_MULT : 0;
+   localparam APUTYPE_INT_DIV    = (SHARED_INT_DIV)  ? SHARED_DSP_MULT + SHARED_INT_MULT : 0;
+   localparam APUTYPE_VALGRIND   = (CUSTOM_VALGRIND) ? SHARED_INT_DIV + SHARED_DSP_MULT + SHARED_INT_MULT : 0;
 
-   localparam APUTYPE_FP         = (SHARED_FP) ? SHARED_DSP_MULT + SHARED_INT_MULT + SHARED_INT_DIV : 0;
+   localparam APUTYPE_FP         = (SHARED_FP) ? CUSTOM_VALGRIND + SHARED_DSP_MULT + SHARED_INT_MULT + SHARED_INT_DIV : 0;
 
    localparam APUTYPE_ADDSUB     = (SHARED_FP) ? APUTYPE_FP   : 0;
    localparam APUTYPE_MULT       = (SHARED_FP) ? APUTYPE_FP+1  : 0;
@@ -75,7 +78,9 @@ module apu_cluster
    localparam APUTYPE_SQRT       = (SHARED_FP_DIVSQRT==1) ? APUTYPE_FP+5 : 0;
    localparam APUTYPE_DIVSQRT    = (SHARED_FP_DIVSQRT==2) ? APUTYPE_FP+4 : 0;
 
-   localparam C_APUTYPES   = (SHARED_FP) ? (SHARED_FP_DIVSQRT==1) ? APUTYPE_FP+6 : (SHARED_FP_DIVSQRT==2) ? APUTYPE_FP+5 : APUTYPE_FP+4 : SHARED_DSP_MULT + SHARED_INT_DIV + SHARED_INT_MULT;
+   localparam C_APUTYPES   = (SHARED_FP) ? (SHARED_FP_DIVSQRT==1) ? APUTYPE_FP+6 :
+                                           (SHARED_FP_DIVSQRT==2) ? APUTYPE_FP+5 :
+                                           APUTYPE_FP+4 : SHARED_DSP_MULT + SHARED_INT_DIV + SHARED_INT_MULT;
 
    cpu_marx_if
      #(
@@ -93,13 +98,13 @@ module apu_cluster
    //////////////////////////
 
    logic                          cpus_ack_ds    [C_NB_CORES-1:0];
-   
+
    logic [31:0]                   cpus_result_us [C_NB_CORES-1:0];
    logic [NDSFLAGS_CPU-1:0]       cpus_flags_us  [C_NB_CORES-1:0];
    logic                          cpus_valid_us  [C_NB_CORES-1:0];
-   
+
    logic                          marx_ack_ds    [C_APUTYPES-1:0][C_NB_CORES-1:0];
-   
+
    logic [31:0]                   marx_result_us [C_APUTYPES-1:0][C_NB_CORES-1:0];
    logic [NUSFLAGS_CPU-1:0]       marx_flags_us  [C_APUTYPES-1:0][C_NB_CORES-1:0];
    logic                          marx_valid_us  [C_APUTYPES-1:0][C_NB_CORES-1:0];
@@ -134,20 +139,20 @@ module apu_cluster
       end
    endgenerate
 
-   
+
    logic ack_temp [C_NB_CORES-1:0];
    logic valid_temp [C_NB_CORES-1:0];
-   
+
    generate
       for (genvar i = 0; i < C_NB_CORES; i++) begin
-         
+
          always_comb begin
 
             ack_temp[i]         = 1'b0;
             valid_temp[i]       = 1'b0;
             cpus_result_us[i]   = '0;
             cpus_flags_us[i]    = '0;
-            
+
             for (int j = 0; j < C_APUTYPES; j++) begin
                // upstream interface
                if (marx_valid_us[j][i]) begin
@@ -159,17 +164,17 @@ module apu_cluster
                // ack for downstream request
                if (marx_ack_ds[j][i])
                  ack_temp[i]          = 1'b1;
-               
+
             end
          end
 
          assign cpus_valid_us[i] = valid_temp[i];
          assign cpus_ack_ds[i]   = ack_temp[i];
-         
+
       end
    endgenerate
-   
-   
+
+
    ///////////////////////////////////
    //     _    ____  _   _ ____     //
    //    / \  |  _ \| | | | ___|    //
@@ -180,9 +185,9 @@ module apu_cluster
    ///////////////////////////////////
 
    /////////////////////////////////////////////////////////////////
-   // DSP - Units                                                    
+   // DSP - Units
    // --------------------------------------------------------------
-   // DSP-mult, DSP-alu                                              
+   // DSP-mult, DSP-alu
    /////////////////////////////////////////////////////////////////
 
    // DSP_MULT
@@ -219,7 +224,7 @@ module apu_cluster
       .cpus(marx_ifs[APUTYPE_DSP_MULT*C_NB_CORES+C_NB_CORES-1:APUTYPE_DSP_MULT*C_NB_CORES]),
       .apus(dsp_mult_ifs)
       );
-   
+
    // DSP_MULT_WRAPPER
       for (genvar i = 0; i < NAPUS_DSP_MULT; i++)
         begin : dsp_mult_wrap
@@ -252,9 +257,9 @@ module apu_cluster
    endgenerate
 
    /////////////////////////////////////////////////////////////////
-   // INT - Units                                                    
+   // INT - Units
    // --------------------------------------------------------------
-   // INT-mult, INT-Div, INT-alu (future)                                              
+   // INT-mult, INT-Div, INT-alu (future)
    /////////////////////////////////////////////////////////////////
 
    // INT_MULT
@@ -270,7 +275,7 @@ module apu_cluster
 
    generate
       if (SHARED_INT_MULT == 1) begin : shared_int_mult
-         
+
    marx
      #(
        .NCPUS(C_NB_CORES),
@@ -291,14 +296,14 @@ module apu_cluster
       .cpus(marx_ifs[APUTYPE_INT_MULT*C_NB_CORES+C_NB_CORES-1:APUTYPE_INT_MULT*C_NB_CORES]),
       .apus(int_mult_ifs)
       );
-   
+
    // INT_MULT_WRAPPER
       for (genvar i = 0; i < NAPUS_INT_MULT; i++)
         begin : int_mult_wrap
            int_mult_wrapper
              #(
                .TAG_WIDTH(WAPUTAG)
-               )  
+               )
            int_mult_wrap_i
              (
               .clk_i            ( clk_i                            ),
@@ -322,6 +327,78 @@ module apu_cluster
       end
    endgenerate
 
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+
+   /////////////////////////////////////////////////////////////////
+   // CUSTOM VALGRIND - Unit
+   // --------------------------------------------------------------
+   /////////////////////////////////////////////////////////////////
+
+  marx_apu_if #(
+    .WOP(WOP_VALGRIND),
+    .NARGS(3),
+    .NUSFLAGS(NUSFLAGS_VALGRIND),
+    .NDSFLAGS(NDSFLAGS_VALGRIND),
+    .WAPUTAG(WAPUTAG)
+  )
+  custom_valgrind_ifs [NAPUS_VALGRIND-1:0] ();
+
+  marx #(
+    .NCPUS(C_NB_CORES),
+    .NAPUS(NAPUS_VALGRIND),
+    .NARB(NAPUS_VALGRIND),
+    .APUTYPE(APUTYPE_VALGRIND),
+
+    .WOP(WOP_VALGRIND),
+    .WAPUTAG(WAPUTAG),
+    .NARGS(3),
+    .NUSFLAGS(NUSFLAGS_VALGRIND),
+    .NDSFLAGS(NDSFLAGS_VALGRIND)
+  )
+
+  marx_valgrind_i (
+    .clk_ci(clk_i),
+    .rst_rbi(rst_ni),
+    .cpus(marx_ifs[APUTYPE_VALGRIND*C_NB_CORES+C_NB_CORES-1:APUTYPE_VALGRIND*C_NB_CORES]),
+    .apus(custom_valgrind_ifs)
+  );
+
+  for (genvar i = 0; i < NAPUS_VALGRIND; i++) begin : valgrind_wrapper
+    valgrind_test #(
+      .TAG_WIDTH(WAPUTAG)
+    ) valgrind_apu (
+      .clk_i            ( clk_i                                   ),
+      .rst_ni           ( rst_ni                                  ),
+      .En_i             ( custom_valgrind_ifs[i].valid_ds_s       ),
+      .Op_i             ( custom_valgrind_ifs[i].op_ds_d          ),
+      .OpA_i            ( custom_valgrind_ifs[i].operands_ds_d[0] ),
+      .OpB_i            ( custom_valgrind_ifs[i].operands_ds_d[1] ),
+      .OpC_i            ( custom_valgrind_ifs[i].operands_ds_d[2] ),
+      .Flags_i          ( custom_valgrind_ifs[i].flags_ds_d       ),
+      .Status_o         ( custom_valgrind_ifs[i].flags_us_d       ),
+      .Tag_i            ( custom_valgrind_ifs[i].tag_ds_d         ),
+      .Res_o            ( custom_valgrind_ifs[i].result_us_d      ),
+      .Tag_o            ( custom_valgrind_ifs[i].tag_us_d         ),
+      .Valid_o          ( custom_valgrind_ifs[i].req_us_s         ),
+      .Ready_o          ( custom_valgrind_ifs[i].ready_ds_s       ),
+      .Ack_i            ( custom_valgrind_ifs[i].ack_us_s         )
+    );
+  end
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+  // // // // // // // // // // // // // // // // // // // // // /// // // /// // // // // /// //
+
    // INT_DIV
    marx_apu_if
      #(
@@ -335,7 +412,7 @@ module apu_cluster
 
    generate
       if (SHARED_INT_DIV == 1) begin : shared_int_div
-         
+
    marx
      #(
        .NCPUS(C_NB_CORES),
@@ -356,14 +433,14 @@ module apu_cluster
       .cpus(marx_ifs[APUTYPE_INT_DIV*C_NB_CORES+C_NB_CORES-1:APUTYPE_INT_DIV*C_NB_CORES]),
       .apus(int_div_ifs)
       );
-   
+
    // INT_DIV_WRAPPER
       for (genvar i = 0; i < NAPUS_INT_DIV; i++)
         begin : int_div_wrap
            int_div
              #(
                .TAG_WIDTH(WAPUTAG)
-               )  
+               )
            int_div_i
              (
               .clk_i            ( clk_i                           ),
@@ -383,11 +460,11 @@ module apu_cluster
         end
       end
    endgenerate
-   
+
    /////////////////////////////////////////////////////////////////
-   // FP - Units                                                     
+   // FP - Units
    // --------------------------------------------------------------
-   // FP-Addsub, FP-mul, FP-mac, FP-cast, FP-div, FP-sqrt            
+   // FP-Addsub, FP-mul, FP-mac, FP-cast, FP-div, FP-sqrt
    /////////////////////////////////////////////////////////////////
 
    // FP_SQRT
@@ -411,7 +488,7 @@ module apu_cluster
        .WAPUTAG(WAPUTAG)
        )
    div_ifs [NAPUS_DIV-1:0] ();
-   
+
    // FP_DIVSQRT
    marx_apu_if
      #(
@@ -471,7 +548,7 @@ module apu_cluster
       if (SHARED_FP == 1) begin : shared_fpu
 
          if (SHARED_FP_DIVSQRT == 1) begin : shared_fp_sqrt
-            
+
             marx
               #(
                 .NCPUS(C_NB_CORES),
@@ -492,7 +569,7 @@ module apu_cluster
                .cpus(marx_ifs[APUTYPE_SQRT*C_NB_CORES+C_NB_CORES-1:APUTYPE_SQRT*C_NB_CORES]),
                .apus(sqrt_ifs)
                );
-            
+
             // FP_SQRT_WRAPPER
             for (genvar i = 0; i < NAPUS_SQRT; i++)
               begin : fp_sqrt_wrap
@@ -513,7 +590,7 @@ module apu_cluster
                     .Res_o            ( sqrt_ifs[i].result_us_d      ),
                     .Tag_o            ( sqrt_ifs[i].tag_us_d         ),
                     .Valid_o          ( sqrt_ifs[i].req_us_s         ),
-                    .Ready_o          ( sqrt_ifs[i].ready_ds_s       ) 
+                    .Ready_o          ( sqrt_ifs[i].ready_ds_s       )
                     );
               end
          end
@@ -562,12 +639,12 @@ module apu_cluster
                  .Res_o            ( addsub_ifs[i].result_us_d      ),
                  .Tag_o            ( addsub_ifs[i].tag_us_d         ),
                  .Valid_o          ( addsub_ifs[i].req_us_s         ),
-                 .Ready_o          ( addsub_ifs[i].ready_ds_s       ) 
+                 .Ready_o          ( addsub_ifs[i].ready_ds_s       )
                  );
            end
 
          if (SHARED_FP_DIVSQRT == 1) begin : shared_fp_div
- 
+
             marx
               #(
                 .NCPUS(C_NB_CORES),
@@ -588,7 +665,7 @@ module apu_cluster
                .cpus(marx_ifs[APUTYPE_DIV*C_NB_CORES+C_NB_CORES-1:APUTYPE_DIV*C_NB_CORES]),
                .apus(div_ifs)
                );
-            
+
             // FP_DIV_WRAPPER
             for (genvar i = 0; i < NAPUS_DIV; i++)
               begin : fp_div_wrap
@@ -610,13 +687,13 @@ module apu_cluster
                     .Res_o            ( div_ifs[i].result_us_d      ),
                     .Tag_o            ( div_ifs[i].tag_us_d         ),
                     .Valid_o          ( div_ifs[i].req_us_s         ),
-                    .Ready_o          ( div_ifs[i].ready_ds_s       ) 
+                    .Ready_o          ( div_ifs[i].ready_ds_s       )
                     );
               end
          end
 
          if (SHARED_FP_DIVSQRT == 2) begin : shared_fp_divsqrt
- 
+
             marx
               #(
                 .NCPUS(C_NB_CORES),
@@ -637,7 +714,7 @@ module apu_cluster
                .cpus(marx_ifs[APUTYPE_DIVSQRT*C_NB_CORES+C_NB_CORES-1:APUTYPE_DIVSQRT*C_NB_CORES]),
                .apus(divsqrt_ifs)
                );
-            
+
             // FP_DIV_WRAPPER
             for (genvar i = 0; i < NAPUS_DIVSQRT; i++)
               begin : fp_divsqrt_wrap
@@ -659,11 +736,11 @@ module apu_cluster
                     .Res_o            ( divsqrt_ifs[i].result_us_d      ),
                     .Tag_o            ( divsqrt_ifs[i].tag_us_d         ),
                     .Valid_o          ( divsqrt_ifs[i].req_us_s         ),
-                    .Ready_o          ( divsqrt_ifs[i].ready_ds_s       ) 
+                    .Ready_o          ( divsqrt_ifs[i].ready_ds_s       )
                     );
               end
          end
-         
+
          // Mult
          marx
            #(
@@ -685,7 +762,7 @@ module apu_cluster
             .cpus(marx_ifs[APUTYPE_MULT*C_NB_CORES+C_NB_CORES-1:APUTYPE_MULT*C_NB_CORES]),
             .apus(mult_ifs)
             );
-         
+
          // FP_MULT_WRAPPER
          for (genvar i = 0; i < NAPUS_MULT; i++)
            begin : fp_mult_wrap
@@ -711,7 +788,7 @@ module apu_cluster
                  .Ack_i            ( mult_ifs[i].ack_us_s         )
                  );
            end
-      
+
          // MAC
          marx
            #(
@@ -733,7 +810,7 @@ module apu_cluster
             .cpus(marx_ifs[APUTYPE_MAC*C_NB_CORES+C_NB_CORES-1:APUTYPE_MAC*C_NB_CORES]),
             .apus(mac_ifs)
             );
-         
+
          // FP_MAC_WRAPPER
          for (genvar i = 0; i < NAPUS_MAC; i++)
            begin : fp_mac_wrap
@@ -761,7 +838,7 @@ module apu_cluster
                  .Ack_i            ( mac_ifs[i].ack_us_s         )
                  );
            end
-         
+
          // CAST
          marx
            #(
@@ -783,7 +860,7 @@ module apu_cluster
             .cpus(marx_ifs[APUTYPE_CAST*C_NB_CORES+C_NB_CORES-1:APUTYPE_CAST*C_NB_CORES]),
             .apus(cast_ifs)
             );
-         
+
          // FP_CAST_WRAPPER
          for (genvar i = 0; i < NAPUS_CAST; i++)
            begin : fp_cast_wrap
@@ -805,7 +882,7 @@ module apu_cluster
                  .Res_o            ( cast_ifs[i].result_us_d      ),
                  .Tag_o            ( cast_ifs[i].tag_us_d         ),
                  .Valid_o          ( cast_ifs[i].req_us_s         ),
-                 .Ready_o          ( cast_ifs[i].ready_ds_s       ) 
+                 .Ready_o          ( cast_ifs[i].ready_ds_s       )
                  );
            end
       end
